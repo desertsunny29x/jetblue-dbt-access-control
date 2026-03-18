@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 function run(cmd, options = {}) {
   try {
@@ -18,6 +20,32 @@ function run(cmd, options = {}) {
     if (stderr) console.error(`\nSTDERR:\n${stderr}`);
     process.exit(1);
   }
+}
+
+function runGh(args) {
+  const result = spawnSync('gh', args, {
+    encoding: 'utf-8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  if (result.status !== 0) {
+    const stdout = result.stdout ? String(result.stdout) : '';
+    const stderr = result.stderr ? String(result.stderr) : '';
+
+    console.error(`\nGitHub CLI command failed: gh ${args.join(' ')}`);
+    if (stdout) console.error(`\nSTDOUT:\n${stdout}`);
+    if (stderr) console.error(`\nSTDERR:\n${stderr}`);
+
+    if (stderr.includes('GitHub Actions is not permitted to create or approve pull requests')) {
+      console.error(
+        '\nFix required: In GitHub repository settings, enable "Allow GitHub Actions to create and approve pull requests", and grant workflow permissions for pull-requests: write and contents: write.'
+      );
+    }
+
+    process.exit(1);
+  }
+
+  return (result.stdout || '').trim();
 }
 
 function tryRun(cmd, options = {}) {
@@ -38,6 +66,21 @@ function tryRun(cmd, options = {}) {
       stderr: error.stderr ? String(error.stderr) : '',
     };
   }
+}
+
+function tryGh(args) {
+  const result = spawnSync('gh', args, {
+    encoding: 'utf-8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  return {
+    ok: result.status === 0,
+    output: (result.stdout || '').trim(),
+    stdout: result.stdout ? String(result.stdout) : '',
+    stderr: result.stderr ? String(result.stderr) : '',
+    status: result.status,
+  };
 }
 
 function validateEnv() {
@@ -131,7 +174,7 @@ function createReleaseBranchFromDevelop() {
   const retryResult = tryRun(`git checkout -b ${retryCandidate} origin/develop`);
 
   if (!retryResult.ok) {
-    console.error(`Unable to create release branch after retry.`);
+    console.error('Unable to create release branch after retry.');
     if (retryResult.stdout) console.error(`\nSTDOUT:\n${retryResult.stdout}`);
     if (retryResult.stderr) console.error(`\nSTDERR:\n${retryResult.stderr}`);
     process.exit(1);
@@ -205,13 +248,7 @@ function updateReadme(changes, version, releaseBranch) {
   const filePath = 'README.md';
   ensureFileExists(
     filePath,
-    [
-      '# Project',
-      '',
-      '<!-- RELEASE_START -->',
-      '<!-- RELEASE_END -->',
-      '',
-    ].join('\n')
+    ['# Project', '', '<!-- RELEASE_START -->', '<!-- RELEASE_END -->', ''].join('\n')
   );
 
   let readme = fs.readFileSync(filePath, 'utf-8');
@@ -224,7 +261,7 @@ function updateReadme(changes, version, releaseBranch) {
   }
 
   const ownerRepo = process.env.GITHUB_REPOSITORY;
-  const prStatusBadge = `![PR Status](https://img.shields.io/badge/release_pr-open-blue)`;
+  const prStatusBadge = '![PR Status](https://img.shields.io/badge/release_pr-open-blue)';
   const releaseBadge = `![Release](https://img.shields.io/badge/release-${version}-green)`;
   const branchBadge = `![Branch](https://img.shields.io/badge/branch-${releaseBranch.replace(/\//g, '%2F')}-orange)`;
 
@@ -241,8 +278,8 @@ function updateReadme(changes, version, releaseBranch) {
     `- Repository: \`${ownerRepo}\``,
     `- Release Version: \`${version}\``,
     `- Release Branch: \`${releaseBranch}\``,
-    `- Source Branch: \`develop\``,
-    `- Target Branch: \`master\``,
+    '- Source Branch: `develop`',
+    '- Target Branch: `master`',
     `- Generated On: \`${new Date().toISOString()}\``,
     '',
     '<details>',
@@ -282,28 +319,33 @@ function commitAndPush(version, releaseBranch) {
 }
 
 function getExistingPrNumber(releaseBranch) {
-  const result = tryRun(
-    `gh pr list --head ${releaseBranch} --base master --state open --json number --jq '.[0].number'`
-  );
+  const result = tryGh([
+    'pr',
+    'list',
+    '--head',
+    releaseBranch,
+    '--base',
+    'master',
+    '--state',
+    'open',
+    '--json',
+    'number',
+    '--jq',
+    '.[0].number',
+  ]);
 
-  if (!result.ok) {
-    return null;
-  }
-
-  const value = (result.output || '').trim();
-  return value || null;
+  if (!result.ok) return null;
+  return result.output || null;
 }
 
-function createOrUpdatePr(version, releaseBranch, changes) {
-  const existingPrNumber = getExistingPrNumber(releaseBranch);
-
+function buildPrBody(version, releaseBranch, changes) {
   const bodyLines = [
     '## Automated Release PR',
     '',
     `- Release Version: \`${version}\``,
     `- Release Branch: \`${releaseBranch}\``,
-    `- Source Branch: \`develop\``,
-    `- Target Branch: \`master\``,
+    '- Source Branch: `develop`',
+    '- Target Branch: `master`',
     '',
     '### Validation',
     '- Generated automatically after changes were merged into `develop`.',
@@ -321,21 +363,59 @@ function createOrUpdatePr(version, releaseBranch, changes) {
     }
   }
 
-  const prBody = bodyLines.join('\n');
-  const title = `Release ${version}`;
+  return bodyLines.join('\n');
+}
 
-  if (existingPrNumber) {
-    console.log(`Updating existing PR #${existingPrNumber}`);
-    run(`gh pr edit ${existingPrNumber} --title "${title}" --body "${prBody.replace(/"/g, '\\"')}"`);
-    return existingPrNumber;
-  }
-
-  console.log('Creating a new PR to master');
-  run(
-    `gh pr create --base master --head ${releaseBranch} --title "${title}" --body "${prBody.replace(/"/g, '\\"')}"`
+function writeTempPrBody(prBody) {
+  const tempFile = path.join(
+    os.tmpdir(),
+    `release-pr-body-${Date.now()}-${Math.random().toString(36).slice(2)}.md`
   );
+  fs.writeFileSync(tempFile, prBody, 'utf-8');
+  return tempFile;
+}
 
-  return getExistingPrNumber(releaseBranch);
+function createOrUpdatePr(version, releaseBranch, changes) {
+  const existingPrNumber = getExistingPrNumber(releaseBranch);
+  const title = `Release ${version}`;
+  const prBody = buildPrBody(version, releaseBranch, changes);
+  const bodyFile = writeTempPrBody(prBody);
+
+  try {
+    if (existingPrNumber) {
+      console.log(`Updating existing PR #${existingPrNumber}`);
+      runGh([
+        'pr',
+        'edit',
+        existingPrNumber,
+        '--title',
+        title,
+        '--body-file',
+        bodyFile,
+      ]);
+      return existingPrNumber;
+    }
+
+    console.log('Creating a new PR to master');
+    runGh([
+      'pr',
+      'create',
+      '--base',
+      'master',
+      '--head',
+      releaseBranch,
+      '--title',
+      title,
+      '--body-file',
+      bodyFile,
+    ]);
+
+    return getExistingPrNumber(releaseBranch);
+  } finally {
+    if (fs.existsSync(bodyFile)) {
+      fs.unlinkSync(bodyFile);
+    }
+  }
 }
 
 function main() {
