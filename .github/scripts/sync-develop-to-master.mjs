@@ -160,17 +160,17 @@ function getNextReleaseBranch() {
   return `${base}_${max + 1}`;
 }
 
-function createReleaseBranchFromDevelop() {
+function createReleaseBranchFromMaster() {
   const candidate = getNextReleaseBranch();
   console.log(`Using release branch: ${candidate}`);
 
-  const first = tryRun(`git checkout -b ${candidate} origin/develop`);
+  const first = tryRun(`git checkout -b ${candidate} origin/master`);
   if (first.ok) return candidate;
 
   console.warn(`Branch creation failed for ${candidate}. Retrying once...`);
 
   const retryCandidate = getNextReleaseBranch();
-  const retry = tryRun(`git checkout -b ${retryCandidate} origin/develop`);
+  const retry = tryRun(`git checkout -b ${retryCandidate} origin/master`);
 
   if (!retry.ok) {
     console.error('Unable to create release branch after retry.');
@@ -181,6 +181,23 @@ function createReleaseBranchFromDevelop() {
 
   console.log(`Using release branch after retry: ${retryCandidate}`);
   return retryCandidate;
+}
+
+function mergeDevelopIntoReleaseBranch() {
+  const mergeResult = tryRun('git merge --no-edit origin/develop');
+
+  if (mergeResult.ok) {
+    console.log('Successfully merged develop into release branch.');
+    return;
+  }
+
+  console.error('Merge conflict detected while merging develop into the release branch.');
+  if (mergeResult.stdout) console.error(`\nSTDOUT:\n${mergeResult.stdout}`);
+  if (mergeResult.stderr) console.error(`\nSTDERR:\n${mergeResult.stderr}`);
+  console.error(
+    'Resolve the conflicts in develop vs master first, or rely on the post-release master-to-develop sync workflow to keep both branches aligned.'
+  );
+  process.exit(1);
 }
 
 function getReleaseNumber(releaseBranch) {
@@ -535,14 +552,17 @@ function main() {
   run('git checkout master');
   run('git pull origin master');
 
-  const releaseBranch = createReleaseBranchFromDevelop();
-  const version = getVersion(releaseBranch);
   const changes = getMergedChanges();
 
   if (changes.length === 0) {
     console.log('No new changes detected between develop and master. Skipping release PR.');
     process.exit(0);
   }
+
+  const releaseBranch = createReleaseBranchFromMaster();
+  mergeDevelopIntoReleaseBranch();
+
+  const version = getVersion(releaseBranch);
 
   updateChangelog(changes, version);
   updateReadme(changes, version, releaseBranch);
