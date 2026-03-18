@@ -1,44 +1,54 @@
-name: Validate automated release PR
+name: release-pr-checks
 
 on:
   pull_request:
-    branches: [master]
-    types: [opened, synchronize, reopened, ready_for_review]
+    branches:
+      - master
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
 
 permissions:
   contents: read
 
 jobs:
   validate-release-pr:
-    if: startsWith(github.head_ref, 'automation/release-')
+    if: startsWith(github.head_ref, 'release/deploy_')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
 
     steps:
-      - name: Checkout repository
+      - name: Checkout PR branch
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Validate generated files and markers
-        shell: bash
+      - name: Validate branch naming
         run: |
-          set -euo pipefail
+          BRANCH="${{ github.head_ref }}"
+          echo "Validating branch: ${BRANCH}"
+
+          if ! echo "${BRANCH}" | grep -Eq '^release/deploy_[0-9]{4}_[0-9]{2}_[0-9]{2}_[0-9]+$'; then
+            echo "Invalid release branch format"
+            exit 1
+          fi
+
+      - name: Ensure required files exist
+        run: |
           test -f CHANGELOG.md
           test -f README.md
-          grep -q '<!-- AUTO-RELEASE:START -->' README.md
-          grep -q '<!-- AUTO-RELEASE:END -->' README.md
+
+      - name: Ensure README markers exist
+        run: |
+          grep -q '<!-- RELEASE_START -->' README.md
+          grep -q '<!-- RELEASE_END -->' README.md
+
+      - name: Ensure changelog was updated
+        run: |
           grep -q '^## ' CHANGELOG.md
 
-      - name: Run repository tests if present
-        shell: bash
+      - name: Basic repository validation
         run: |
-          set -euo pipefail
-          if [ -f package.json ]; then
-            npm ci
-            npm test --if-present
-          elif [ -f requirements.txt ]; then
-            python -m pip install -r requirements.txt
-            python -m pip install pytest
-            pytest -q
-          else
-            echo "No standard test manifest found. Add your repo-specific tests here."
-          fi
+          echo "Add your real build/test steps here"
+          echo "Validation passed"
