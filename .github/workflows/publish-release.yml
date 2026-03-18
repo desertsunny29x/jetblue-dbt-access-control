@@ -22,11 +22,20 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (
         github.event.pull_request.merged == true &&
+        github.event.pull_request.base.ref == 'master' &&
         startsWith(github.event.pull_request.head.ref, 'release/deploy_')
       )
     runs-on: ubuntu-latest
 
     steps:
+      - name: Print event details
+        run: |
+          echo "event_name=${{ github.event_name }}"
+          echo "default_branch=${{ github.event.repository.default_branch }}"
+          echo "base_ref=${{ github.event.pull_request.base.ref }}"
+          echo "head_ref=${{ github.event.pull_request.head.ref }}"
+          echo "merged=${{ github.event.pull_request.merged }}"
+
       - name: Checkout master
         uses: actions/checkout@v4
         with:
@@ -41,16 +50,11 @@ jobs:
       - name: Determine release branch and title
         id: release_pr
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual run detected. Attempting to find latest merged release PR."
-          fi
-
           if [ "${{ github.event_name }}" = "pull_request_target" ]; then
             echo "head_ref=${{ github.event.pull_request.head.ref }}" >> "$GITHUB_OUTPUT"
             echo "title=${{ github.event.pull_request.title }}" >> "$GITHUB_OUTPUT"
           else
             echo "Manual workflow_dispatch fallback is not fully automated."
-            echo "Please use PR merge trigger for normal runs."
             exit 1
           fi
 
