@@ -4,5 +4,13 @@
 
 ### Release v2026_03_18_1
 
+- Access Control - Create file2.txt ([#48](https://github.com/desertsunny29x/jetblue-dbt-access-control/pull/48))
+- Sync master back to develop ([#47](https://github.com/desertsunny29x/jetblue-dbt-access-control/pull/47))
+
+## 2026-03-18
+
+### Release v2026_03_18_1
+
 - Access Control - Update file1.txt ([#45](https://github.com/desertsunny29x/jetblue-dbt-access-control/pull/45))
+
 
