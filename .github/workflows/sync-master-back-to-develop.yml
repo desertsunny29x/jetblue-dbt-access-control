@@ -1,0 +1,49 @@
+name: sync-master-back-to-develop
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-master-back-to-develop
+  cancel-in-progress: false
+
+jobs:
+  sync-master-back-to-develop:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch latest branches
+        run: |
+          git fetch origin --prune
+          git checkout develop
+          git pull origin develop
+          git checkout master
+          git pull origin master
+
+      - name: Sync master into develop
+        run: |
+          git checkout develop
+          git merge --no-edit origin/master || {
+            echo "Merge conflict while syncing master back into develop."
+            exit 1
+          }
+
+      - name: Push develop
+        run: |
+          git push origin develop
