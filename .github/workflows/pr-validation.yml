@@ -1,0 +1,121 @@
+name: PR Validation
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+      - labeled
+      - unlabeled
+      - assigned
+      - unassigned
+      - review_requested
+      - review_request_removed
+
+permissions:
+  pull-requests: write
+  contents: read
+  issues: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const errors = [];
+
+            const branch = pr.head.ref;
+            const body = pr.body || "";
+            const isReleasePr = branch.startsWith("release/");
+
+            // 1. Branch name validation
+            if (!/^(fix|access|feature|release)\/[a-z0-9/_-]+$/.test(branch)) {
+              errors.push(`❌ Branch name \`${branch}\` must start with \`access/\`, \`fix/\`, \`feature/\` or \`release/\` and contain only lowercase letters, numbers, /, _ or -`);
+            }
+
+            // For automated release PRs, skip the mandatory metadata checks
+            if (!isReleasePr) {
+              // 2. Title check
+              if (!/^Access Control - .+/.test(pr.title)) {
+                errors.push(`❌ PR title must start with **"Access Control - "**`);
+              }
+
+              // 3. Justification check
+              if (!/## Justification:/.test(body)) {
+                errors.push(`❌ PR description must include a **Justification** section:\n   \`## Justification:\``);
+              }
+
+              // 3b. Confirmation checkbox must be checked
+              const confirmationText = "I confirm that the dbt job run_grants includes the necessary fix in the event of a failure.";
+              const escapedConfirmationText = confirmationText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const confirmationChecked = new RegExp(`-\\s*\\[[xX]\\]\\s*${escapedConfirmationText}`);
+              if (!confirmationChecked.test(body)) {
+                errors.push(`❌ Please check the confirmation box in the PR description:\n   \`- [x] ${confirmationText}\``);
+              }
+
+              // 4. Labels check
+              if (!pr.labels || pr.labels.length === 0) {
+                errors.push(`❌ At least one **label** must be set`);
+              }
+
+              // 5. Assignees check
+              if (!pr.assignees || pr.assignees.length === 0) {
+                errors.push(`❌ At least one **assignee** must be set`);
+              }
+
+              // 6. Reviewer check
+              const reviewers = pr.requested_reviewers || [];
+              if (reviewers.length === 0) {
+                errors.push(`❌ At least one **reviewer** must be requested`);
+              }
+            }
+
+            // Prepare comment body with a hidden marker so we can update it
+            let commentBody = "";
+            if (errors.length > 0) {
+              commentBody = [
+                "<!-- pr-validation -->",
+                "🚨 **PR Validation Failed**",
+                "",
+                ...errors.map(e => `- ${e}`)
+              ].join("\n");
+              core.setFailed("PR validation failed. See comment for details.");
+            } else {
+              commentBody = isReleasePr
+                ? "<!-- pr-validation -->\n✅ Release PR detected (`release/*`) — mandatory title, justification, checkbox, label, assignee, and reviewer checks were skipped."
+                : "<!-- pr-validation -->\n✅ All PR validations passed!";
+            }
+
+            const { owner, repo } = context.repo;
+            const issue_number = pr.number;
+
+            // Get existing comments to find if our validation comment exists
+            const { data: comments } = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number
+            });
+
+            const existing = comments.find(c => c.body && c.body.includes("<!-- pr-validation -->"));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body: commentBody
+              });
+            }
