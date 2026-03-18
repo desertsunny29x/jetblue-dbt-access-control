@@ -492,6 +492,36 @@ function createOrUpdatePr(version, releaseBranch, changes) {
   }
 }
 
+function enableAutoMerge(prNumber) {
+  if (!prNumber) {
+    console.log('No PR number available. Skipping auto-merge enablement.');
+    return;
+  }
+
+  console.log(`Enabling auto-merge for PR #${prNumber}`);
+
+  const result = tryGh([
+    'pr',
+    'merge',
+    String(prNumber),
+    '--auto',
+    '--merge',
+    '--delete-branch',
+  ]);
+
+  if (!result.ok) {
+    console.warn(`Unable to enable auto-merge for PR #${prNumber}.`);
+    if (result.stdout) console.warn(`\nSTDOUT:\n${result.stdout}`);
+    if (result.stderr) console.warn(`\nSTDERR:\n${result.stderr}`);
+    console.warn(
+      'Check repository settings: auto-merge must be enabled, merge method must be allowed, and branch deletion must be permitted.'
+    );
+    return;
+  }
+
+  console.log(`Auto-merge enabled for PR #${prNumber}`);
+}
+
 function main() {
   validateEnv();
   ensureGitHubCli();
@@ -509,12 +539,19 @@ function main() {
   const version = getVersion(releaseBranch);
   const changes = getMergedChanges();
 
+  if (changes.length === 0) {
+    console.log('No new changes detected between develop and master. Skipping release PR.');
+    process.exit(0);
+  }
+
   updateChangelog(changes, version);
   updateReadme(changes, version, releaseBranch);
   commitAndPush(version, releaseBranch);
+
   const prNumber = createOrUpdatePr(version, releaseBranch, changes);
 
   if (prNumber) {
+    enableAutoMerge(prNumber);
     console.log(`Release PR is ready: #${prNumber}`);
   } else {
     console.log('Release PR creation/update completed.');
