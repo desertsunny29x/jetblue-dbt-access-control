@@ -4,10 +4,15 @@ on:
   push:
     branches:
       - master
+  workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: read
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
 
 jobs:
   publish-release:
@@ -24,44 +29,72 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Find next release tag
-        id: tag
-        shell: bash
+      - name: Find latest merged release PR
+        id: release_pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          DATE="$(date -u +%Y_%m_%d)"
-          PREFIX="v${DATE}_"
+          PR_JSON=$(gh pr list \
+            --base master \
+            --state merged \
+            --limit 20 \
+            --json number,title,headRefName,mergedAt \
+            --jq '[.[] | select(.headRefName | startswith("release/deploy_"))] | sort_by(.mergedAt) | last')
 
-          git fetch --tags
-
-          LAST_NUM=$(git tag -l "${PREFIX}*" | sed "s/^${PREFIX}//" | sort -n | tail -1)
-          if [ -z "$LAST_NUM" ]; then
-            NEXT_NUM=1
-          else
-            NEXT_NUM=$((LAST_NUM + 1))
+          if [ -z "$PR_JSON" ] || [ "$PR_JSON" = "null" ]; then
+            echo "No merged release PR found."
+            exit 1
           fi
 
-          TAG="${PREFIX}${NEXT_NUM}"
+          echo "pr_json<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$PR_JSON" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
 
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Release tag will be: ${TAG}"
+          HEAD_REF=$(echo "$PR_JSON" | jq -r '.headRefName')
+          TITLE=$(echo "$PR_JSON" | jq -r '.title')
+
+          echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+
+      - name: Derive tag from release branch
+        id: tag
+        run: |
+          BRANCH="${{ steps.release_pr.outputs.head_ref }}"
+          TAG=$(echo "$BRANCH" | sed 's#^release/deploy_#v#')
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Using tag: $TAG"
+
+      - name: Check if tag already exists
+        id: tag_check
+        run: |
+          git fetch --tags
+          if git rev-parse "${{ steps.tag.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create git tag
+        if: steps.tag_check.outputs.exists == 'false'
         run: |
           git tag "${{ steps.tag.outputs.tag }}"
           git push origin "${{ steps.tag.outputs.tag }}"
 
-      - name: Generate release notes
+      - name: Build release notes
         run: |
-          cat > release_notes.md <<'EOF'
+          cat > release_notes.md <<EOF
           ## Automated Production Release
 
-          - Target branch: `master`
-          - Release tag: `${{ steps.tag.outputs.tag }}`
+          - Release Tag: \`${{ steps.tag.outputs.tag }}\`
+          - Release PR Title: \`${{ steps.release_pr.outputs.title }}\`
+          - Release Branch: \`${{ steps.release_pr.outputs.head_ref }}\`
+          - Target Branch: \`master\`
 
-          This release was generated automatically after the release PR was merged into `master`.
+          This release was published automatically after the release PR was merged into \`master\`.
           EOF
 
       - name: Create GitHub Release
+        if: steps.tag_check.outputs.exists == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
