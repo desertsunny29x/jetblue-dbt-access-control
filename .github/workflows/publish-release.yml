@@ -1,9 +1,11 @@
 name: publish-release
 
 on:
-  push:
+  pull_request_target:
     branches:
       - master
+    types:
+      - closed
   workflow_dispatch:
 
 permissions:
@@ -16,12 +18,19 @@ concurrency:
 
 jobs:
   publish-release:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.pull_request.merged == true &&
+        startsWith(github.event.pull_request.head.ref, 'release/deploy_')
+      )
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout master
         uses: actions/checkout@v4
         with:
+          ref: master
           fetch-depth: 0
 
       - name: Setup Git identity
@@ -29,32 +38,21 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Find latest merged release PR
+      - name: Determine release branch and title
         id: release_pr
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PR_JSON=$(gh pr list \
-            --base master \
-            --state merged \
-            --limit 20 \
-            --json number,title,headRefName,mergedAt \
-            --jq '[.[] | select(.headRefName | startswith("release/deploy_"))] | sort_by(.mergedAt) | last')
-
-          if [ -z "$PR_JSON" ] || [ "$PR_JSON" = "null" ]; then
-            echo "No merged release PR found."
-            exit 1
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual run detected. Attempting to find latest merged release PR."
           fi
 
-          echo "pr_json<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$PR_JSON" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-          HEAD_REF=$(echo "$PR_JSON" | jq -r '.headRefName')
-          TITLE=$(echo "$PR_JSON" | jq -r '.title')
-
-          echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
-          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
+            echo "head_ref=${{ github.event.pull_request.head.ref }}" >> "$GITHUB_OUTPUT"
+            echo "title=${{ github.event.pull_request.title }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "Manual workflow_dispatch fallback is not fully automated."
+            echo "Please use PR merge trigger for normal runs."
+            exit 1
+          fi
 
       - name: Derive tag from release branch
         id: tag
