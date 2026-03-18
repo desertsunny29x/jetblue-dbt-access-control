@@ -1,0 +1,71 @@
+name: publish-release
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  publish-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Find next release tag
+        id: tag
+        shell: bash
+        run: |
+          DATE="$(date -u +%Y_%m_%d)"
+          PREFIX="v${DATE}_"
+
+          git fetch --tags
+
+          LAST_NUM=$(git tag -l "${PREFIX}*" | sed "s/^${PREFIX}//" | sort -n | tail -1)
+          if [ -z "$LAST_NUM" ]; then
+            NEXT_NUM=1
+          else
+            NEXT_NUM=$((LAST_NUM + 1))
+          fi
+
+          TAG="${PREFIX}${NEXT_NUM}"
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Release tag will be: ${TAG}"
+
+      - name: Create git tag
+        run: |
+          git tag "${{ steps.tag.outputs.tag }}"
+          git push origin "${{ steps.tag.outputs.tag }}"
+
+      - name: Generate release notes
+        run: |
+          cat > release_notes.md <<'EOF'
+          ## Automated Production Release
+
+          - Target branch: `master`
+          - Release tag: `${{ steps.tag.outputs.tag }}`
+
+          This release was generated automatically after the release PR was merged into `master`.
+          EOF
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --title "Release ${{ steps.tag.outputs.tag }}" \
+            --notes-file release_notes.md \
+            --generate-notes
