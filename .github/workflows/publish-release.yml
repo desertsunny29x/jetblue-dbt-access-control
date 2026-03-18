@@ -1,41 +1,22 @@
 name: publish-release
 
 on:
-  pull_request_target:
-    branches:
-      - master
+  workflow_run:
+    workflows: ["sync-release-pr"]
     types:
-      - closed
-  workflow_dispatch:
+      - completed
 
 permissions:
   contents: write
   pull-requests: read
 
-concurrency:
-  group: publish-release
-  cancel-in-progress: false
-
 jobs:
   publish-release:
     if: >
-      github.event_name == 'workflow_dispatch' ||
-      (
-        github.event.pull_request.merged == true &&
-        github.event.pull_request.base.ref == 'master' &&
-        startsWith(github.event.pull_request.head.ref, 'release/deploy_')
-      )
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
 
     steps:
-      - name: Print event details
-        run: |
-          echo "event_name=${{ github.event_name }}"
-          echo "default_branch=${{ github.event.repository.default_branch }}"
-          echo "base_ref=${{ github.event.pull_request.base.ref }}"
-          echo "head_ref=${{ github.event.pull_request.head.ref }}"
-          echo "merged=${{ github.event.pull_request.merged }}"
-
       - name: Checkout master
         uses: actions/checkout@v4
         with:
@@ -47,60 +28,44 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Determine release branch and title
-        id: release_pr
+      - name: Find latest merged release PR
+        id: pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
-            echo "head_ref=${{ github.event.pull_request.head.ref }}" >> "$GITHUB_OUTPUT"
-            echo "title=${{ github.event.pull_request.title }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "Manual workflow_dispatch fallback is not fully automated."
+          PR_JSON=$(gh pr list \
+            --base master \
+            --state merged \
+            --limit 10 \
+            --json number,title,headRefName,mergedAt \
+            --jq '[.[] | select(.headRefName | startswith("release/deploy_"))] | sort_by(.mergedAt) | last')
+
+          if [ -z "$PR_JSON" ] || [ "$PR_JSON" = "null" ]; then
+            echo "No release PR found"
             exit 1
           fi
 
-      - name: Derive tag from release branch
+          HEAD=$(echo "$PR_JSON" | jq -r '.headRefName')
+          TITLE=$(echo "$PR_JSON" | jq -r '.title')
+
+          echo "branch=$HEAD" >> $GITHUB_OUTPUT
+          echo "title=$TITLE" >> $GITHUB_OUTPUT
+
+      - name: Generate tag
         id: tag
         run: |
-          BRANCH="${{ steps.release_pr.outputs.head_ref }}"
-          TAG=$(echo "$BRANCH" | sed 's#^release/deploy_#v#')
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Using tag: $TAG"
+          TAG=$(echo "${{ steps.pr.outputs.branch }}" | sed 's#^release/deploy_#v#')
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Check if tag already exists
-        id: tag_check
-        run: |
-          git fetch --tags
-          if git rev-parse "${{ steps.tag.outputs.tag }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create git tag
-        if: steps.tag_check.outputs.exists == 'false'
+      - name: Create tag
         run: |
           git tag "${{ steps.tag.outputs.tag }}"
-          git push origin "${{ steps.tag.outputs.tag }}"
+          git push origin "${{ steps.tag.outputs.tag }}" || true
 
-      - name: Build release notes
-        run: |
-          cat > release_notes.md <<EOF
-          ## Automated Production Release
-
-          - Release Tag: \`${{ steps.tag.outputs.tag }}\`
-          - Release PR Title: \`${{ steps.release_pr.outputs.title }}\`
-          - Release Branch: \`${{ steps.release_pr.outputs.head_ref }}\`
-          - Target Branch: \`master\`
-
-          This release was published automatically after the release PR was merged into \`master\`.
-          EOF
-
-      - name: Create GitHub Release
-        if: steps.tag_check.outputs.exists == 'false'
+      - name: Create Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${{ steps.tag.outputs.tag }}" \
             --title "Release ${{ steps.tag.outputs.tag }}" \
-            --notes-file release_notes.md \
             --generate-notes
