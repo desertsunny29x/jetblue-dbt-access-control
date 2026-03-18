@@ -22,32 +22,6 @@ function run(cmd, options = {}) {
   }
 }
 
-function runGh(args) {
-  const result = spawnSync('gh', args, {
-    encoding: 'utf-8',
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-
-  if (result.status !== 0) {
-    const stdout = result.stdout ? String(result.stdout) : '';
-    const stderr = result.stderr ? String(result.stderr) : '';
-
-    console.error(`\nGitHub CLI command failed: gh ${args.join(' ')}`);
-    if (stdout) console.error(`\nSTDOUT:\n${stdout}`);
-    if (stderr) console.error(`\nSTDERR:\n${stderr}`);
-
-    if (stderr.includes('GitHub Actions is not permitted to create or approve pull requests')) {
-      console.error(
-        '\nFix required: In GitHub repository settings, enable "Allow GitHub Actions to create and approve pull requests", and grant workflow permissions for pull-requests: write and contents: write.'
-      );
-    }
-
-    process.exit(1);
-  }
-
-  return (result.stdout || '').trim();
-}
-
 function tryRun(cmd, options = {}) {
   try {
     return {
@@ -61,17 +35,46 @@ function tryRun(cmd, options = {}) {
   } catch (error) {
     return {
       ok: false,
-      error,
+      output: '',
       stdout: error.stdout ? String(error.stdout) : '',
       stderr: error.stderr ? String(error.stderr) : '',
     };
   }
 }
 
+function runGh(args) {
+  const result = spawnSync('gh', args, {
+    encoding: 'utf-8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: process.env,
+  });
+
+  if (result.status !== 0) {
+    const stdout = result.stdout ? String(result.stdout) : '';
+    const stderr = result.stderr ? String(result.stderr) : '';
+
+    console.error(`\nGitHub CLI command failed: gh ${args.join(' ')}`);
+    if (stdout) console.error(`\nSTDOUT:\n${stdout}`);
+    if (stderr) console.error(`\nSTDERR:\n${stderr}`);
+
+    if (stderr.includes('GitHub Actions is not permitted to create or approve pull requests')) {
+      console.error(
+        '\nRepository setting required: Settings > Actions > General > Workflow permissions > ' +
+        '"Read and write permissions" and enable "Allow GitHub Actions to create and approve pull requests".'
+      );
+    }
+
+    process.exit(1);
+  }
+
+  return (result.stdout || '').trim();
+}
+
 function tryGh(args) {
   const result = spawnSync('gh', args, {
     encoding: 'utf-8',
     stdio: ['pipe', 'pipe', 'pipe'],
+    env: process.env,
   });
 
   return {
@@ -79,13 +82,12 @@ function tryGh(args) {
     output: (result.stdout || '').trim(),
     stdout: result.stdout ? String(result.stdout) : '',
     stderr: result.stderr ? String(result.stderr) : '',
-    status: result.status,
   };
 }
 
 function validateEnv() {
   const required = ['GITHUB_REPOSITORY', 'GITHUB_TOKEN'];
-  const missing = required.filter((key) => !process.env[key]);
+  const missing = required.filter((name) => !process.env[name]);
 
   if (missing.length > 0) {
     console.error(`Missing required environment variables: ${missing.join(', ')}`);
@@ -96,7 +98,7 @@ function validateEnv() {
 function ensureGitHubCli() {
   const result = tryRun('gh --version');
   if (!result.ok) {
-    console.error('GitHub CLI (gh) is not installed or not available in PATH.');
+    console.error('GitHub CLI (gh) is not available on this runner.');
     process.exit(1);
   }
 }
@@ -109,9 +111,9 @@ function ensureFileExists(filePath, defaultContent = '') {
 
 function getFormattedDate() {
   const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
   return `${yyyy}_${mm}_${dd}`;
 }
 
@@ -133,8 +135,7 @@ function escapeRegExp(value) {
 
 function getNextReleaseBranch() {
   const date = getFormattedDate();
-  const base = `release/deploy_${date}`;
-  const sanitizedBase = sanitizeBranchName(base);
+  const base = sanitizeBranchName(`release/deploy_${date}`);
 
   const branchesRaw = run('git ls-remote --heads origin');
   const branches = branchesRaw
@@ -143,7 +144,7 @@ function getNextReleaseBranch() {
     .filter(Boolean)
     .map((ref) => ref.replace('refs/heads/', ''));
 
-  const regex = new RegExp(`^${escapeRegExp(sanitizedBase)}_(\\d+)$`);
+  const regex = new RegExp(`^${escapeRegExp(base)}_(\\d+)$`);
   let max = 0;
 
   for (const branch of branches) {
@@ -156,27 +157,25 @@ function getNextReleaseBranch() {
     }
   }
 
-  return `${sanitizedBase}_${max + 1}`;
+  return `${base}_${max + 1}`;
 }
 
 function createReleaseBranchFromDevelop() {
   const candidate = getNextReleaseBranch();
   console.log(`Using release branch: ${candidate}`);
 
-  const createResult = tryRun(`git checkout -b ${candidate} origin/develop`);
-  if (createResult.ok) {
-    return candidate;
-  }
+  const first = tryRun(`git checkout -b ${candidate} origin/develop`);
+  if (first.ok) return candidate;
 
-  console.warn(`Initial branch creation failed for ${candidate}. Retrying once...`);
+  console.warn(`Branch creation failed for ${candidate}. Retrying once...`);
 
   const retryCandidate = getNextReleaseBranch();
-  const retryResult = tryRun(`git checkout -b ${retryCandidate} origin/develop`);
+  const retry = tryRun(`git checkout -b ${retryCandidate} origin/develop`);
 
-  if (!retryResult.ok) {
+  if (!retry.ok) {
     console.error('Unable to create release branch after retry.');
-    if (retryResult.stdout) console.error(`\nSTDOUT:\n${retryResult.stdout}`);
-    if (retryResult.stderr) console.error(`\nSTDERR:\n${retryResult.stderr}`);
+    if (retry.stdout) console.error(`\nSTDOUT:\n${retry.stdout}`);
+    if (retry.stderr) console.error(`\nSTDERR:\n${retry.stderr}`);
     process.exit(1);
   }
 
@@ -208,18 +207,18 @@ function updateChangelog(changes, version) {
   const filePath = 'CHANGELOG.md';
   ensureFileExists(filePath, '# Changelog\n\n');
 
-  const displayDate = getDisplayDate();
   let existing = fs.readFileSync(filePath, 'utf-8');
-
   if (!existing.trim()) {
     existing = '# Changelog\n\n';
   }
 
-  const lines = [];
-  lines.push(`## ${displayDate}`);
-  lines.push('');
-  lines.push(`### Release ${version}`);
-  lines.push('');
+  const displayDate = getDisplayDate();
+  const lines = [
+    `## ${displayDate}`,
+    '',
+    `### Release ${version}`,
+    '',
+  ];
 
   if (changes.length === 0) {
     lines.push('- No application changes detected between develop and master.');
@@ -230,15 +229,13 @@ function updateChangelog(changes, version) {
   }
 
   lines.push('');
-
   const entry = `${lines.join('\n')}\n`;
 
   const headerMatch = existing.match(/^# .*\n+/);
   if (headerMatch) {
     const header = headerMatch[0];
     const rest = existing.slice(header.length).trimStart();
-    const updated = `${header}${entry}${rest ? `${rest}\n` : ''}`;
-    fs.writeFileSync(filePath, updated, 'utf-8');
+    fs.writeFileSync(filePath, `${header}${entry}${rest ? `${rest}\n` : ''}`, 'utf-8');
   } else {
     fs.writeFileSync(filePath, `# Changelog\n\n${entry}${existing}`, 'utf-8');
   }
@@ -248,11 +245,10 @@ function updateReadme(changes, version, releaseBranch) {
   const filePath = 'README.md';
   ensureFileExists(
     filePath,
-    ['# Project', '', '<!-- RELEASE_START -->', '<!-- RELEASE_END -->', ''].join('\n')
+    '# Project\n\n<!-- RELEASE_START -->\n<!-- RELEASE_END -->\n'
   );
 
   let readme = fs.readFileSync(filePath, 'utf-8');
-
   const startMarker = '<!-- RELEASE_START -->';
   const endMarker = '<!-- RELEASE_END -->';
 
@@ -265,10 +261,9 @@ function updateReadme(changes, version, releaseBranch) {
   const releaseBadge = `![Release](https://img.shields.io/badge/release-${version}-green)`;
   const branchBadge = `![Branch](https://img.shields.io/badge/branch-${releaseBranch.replace(/\//g, '%2F')}-orange)`;
 
-  const changesBlock =
-    changes.length === 0
-      ? '- No application changes detected between develop and master.'
-      : changes.map((item) => `- ${item}`).join('\n');
+  const changesBlock = changes.length === 0
+    ? '- No application changes detected between develop and master.'
+    : changes.map((item) => `- ${item}`).join('\n');
 
   const section = [
     '## Latest Automated Release',
@@ -301,7 +296,7 @@ function updateReadme(changes, version, releaseBranch) {
   fs.writeFileSync(filePath, updated, 'utf-8');
 }
 
-function hasFileChanges() {
+function hasTrackedFileChanges() {
   const status = run('git status --porcelain');
   return Boolean(status);
 }
@@ -309,29 +304,25 @@ function hasFileChanges() {
 function commitAndPush(version, releaseBranch) {
   run('git add CHANGELOG.md README.md');
 
-  if (!hasFileChanges()) {
+  if (!hasTrackedFileChanges()) {
     console.log('No documentation changes detected. Skipping commit.');
-    return;
+    return false;
   }
 
   run(`git commit -m "chore: release ${version}"`);
   run(`git push -u origin ${releaseBranch}`);
+  return true;
 }
 
 function getExistingPrNumber(releaseBranch) {
   const result = tryGh([
     'pr',
     'list',
-    '--head',
-    releaseBranch,
-    '--base',
-    'master',
-    '--state',
-    'open',
-    '--json',
-    'number',
-    '--jq',
-    '.[0].number',
+    '--head', releaseBranch,
+    '--base', 'master',
+    '--state', 'open',
+    '--json', 'number',
+    '--jq', '.[0].number',
   ]);
 
   if (!result.ok) return null;
@@ -339,7 +330,7 @@ function getExistingPrNumber(releaseBranch) {
 }
 
 function buildPrBody(version, releaseBranch, changes) {
-  const bodyLines = [
+  const lines = [
     '## Automated Release PR',
     '',
     `- Release Version: \`${version}\``,
@@ -356,14 +347,14 @@ function buildPrBody(version, releaseBranch, changes) {
   ];
 
   if (changes.length === 0) {
-    bodyLines.push('- No application changes detected between develop and master.');
+    lines.push('- No application changes detected between develop and master.');
   } else {
     for (const change of changes) {
-      bodyLines.push(`- ${change}`);
+      lines.push(`- ${change}`);
     }
   }
 
-  return bodyLines.join('\n');
+  return lines.join('\n');
 }
 
 function writeTempPrBody(prBody) {
@@ -388,10 +379,8 @@ function createOrUpdatePr(version, releaseBranch, changes) {
         'pr',
         'edit',
         existingPrNumber,
-        '--title',
-        title,
-        '--body-file',
-        bodyFile,
+        '--title', title,
+        '--body-file', bodyFile,
       ]);
       return existingPrNumber;
     }
@@ -400,14 +389,10 @@ function createOrUpdatePr(version, releaseBranch, changes) {
     runGh([
       'pr',
       'create',
-      '--base',
-      'master',
-      '--head',
-      releaseBranch,
-      '--title',
-      title,
-      '--body-file',
-      bodyFile,
+      '--base', 'master',
+      '--head', releaseBranch,
+      '--title', title,
+      '--body-file', bodyFile,
     ]);
 
     return getExistingPrNumber(releaseBranch);
@@ -425,7 +410,7 @@ function main() {
   run('git config user.name "github-actions[bot]"');
   run('git config user.email "41898282+github-actions[bot]@users.noreply.github.com"');
 
-  run('git fetch origin');
+  run('git fetch origin --prune');
   run('git checkout develop');
   run('git pull origin develop');
   run('git checkout master');
@@ -438,7 +423,6 @@ function main() {
   updateChangelog(changes, version);
   updateReadme(changes, version, releaseBranch);
   commitAndPush(version, releaseBranch);
-
   const prNumber = createOrUpdatePr(version, releaseBranch, changes);
 
   if (prNumber) {
