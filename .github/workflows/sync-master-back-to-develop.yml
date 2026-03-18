@@ -5,14 +5,19 @@ on:
     workflows: ["sync-release-pr"]
     types:
       - completed
+  workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: sync-master-back-to-develop
+  cancel-in-progress: false
+
 jobs:
   sync:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
 
     steps:
@@ -26,32 +31,90 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Sync master → develop
+      - name: Fetch latest branches
         run: |
-          git fetch origin
+          git fetch origin --prune
           git checkout develop
           git pull origin develop
+          git checkout master
+          git pull origin master
 
-          BRANCH="sync/master_to_develop_$(date +%s)"
-          git checkout -b $BRANCH
+      - name: Create sync branch name
+        id: sync_branch
+        run: |
+          BRANCH="sync/master_to_develop_$(date -u +%Y_%m_%d_%H%M%S)"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Using sync branch: $BRANCH"
 
-          git merge origin/master || exit 1
+      - name: Create sync branch from develop
+        run: |
+          git checkout develop
+          git checkout -b "${{ steps.sync_branch.outputs.branch }}"
 
-          git push origin $BRANCH
+      - name: Merge master into sync branch
+        run: |
+          git merge --no-edit origin/master || {
+            echo "Merge conflict while syncing master back into develop."
+            exit 1
+          }
 
-      - name: Create PR
+      - name: Push sync branch
+        run: |
+          git push -u origin "${{ steps.sync_branch.outputs.branch }}"
+
+      - name: Check for existing sync PR
+        id: existing_pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=$(gh pr list \
+            --base develop \
+            --head "${{ steps.sync_branch.outputs.branch }}" \
+            --state open \
+            --json number \
+            --jq '.[0].number')
+
+          if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "Sync PR already exists: #$PR_NUMBER"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create sync PR
+        if: steps.existing_pr.outputs.exists == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr create \
             --base develop \
-            --head $BRANCH \
-            --title "Sync master → develop" \
-            --body "Automated sync"
+            --head "${{ steps.sync_branch.outputs.branch }}" \
+            --title "Sync master back to develop" \
+            --body "Automated PR to sync release documentation and release metadata from master back into develop."
+
+      - name: Get sync PR number
+        id: pr_number
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=$(gh pr list \
+            --base develop \
+            --head "${{ steps.sync_branch.outputs.branch }}" \
+            --state open \
+            --json number \
+            --jq '.[0].number')
+
+          if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
+            echo "No sync PR found."
+            exit 1
+          fi
+
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "Sync PR number: $PR_NUMBER"
 
       - name: Enable auto merge
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PR=$(gh pr list --head $BRANCH --json number --jq '.[0].number')
-          gh pr merge $PR --auto --merge --delete-branch || true
+          gh pr merge "${{ steps.pr_number.outputs.number }}" --auto --merge --delete-branch || true
