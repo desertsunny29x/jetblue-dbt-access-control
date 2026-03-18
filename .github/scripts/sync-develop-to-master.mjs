@@ -203,6 +203,53 @@ function getDevelopOnlyCommits() {
     .filter(Boolean);
 }
 
+function getPullRequestForCommit(repo, sha) {
+  const result = tryGh([
+    'api',
+    '-H', 'Accept: application/vnd.github+json',
+    `repos/${repo}/commits/${sha}/pulls`,
+  ]);
+
+  if (!result.ok || !result.output) {
+    return null;
+  }
+
+  let prs;
+  try {
+    prs = JSON.parse(result.output);
+  } catch {
+    return null;
+  }
+
+  if (!Array.isArray(prs) || prs.length === 0) {
+    return null;
+  }
+
+  const mergedPr = prs.find((pr) => pr && pr.merged_at) || prs[0];
+  if (!mergedPr) return null;
+
+  return {
+    title: mergedPr.title || null,
+    number: mergedPr.number || null,
+    url: mergedPr.html_url || null,
+  };
+}
+
+function getMergedChangesFallbackFromGitLog() {
+  const raw = tryRun('git log origin/master..origin/develop --pretty=format:"%s"');
+  if (!raw.ok || !raw.output) return [];
+
+  return raw.output
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((title) => ({
+      title,
+      number: null,
+      url: null,
+    }));
+}
+
 function getMergedChanges() {
   const repo = process.env.GITHUB_REPOSITORY;
   const developOnlyCommits = getDevelopOnlyCommits();
@@ -211,96 +258,31 @@ function getMergedChanges() {
     return [];
   }
 
-  const developOnlySet = new Set(developOnlyCommits);
-
-  const result = tryGh([
-    'pr',
-    'list',
-    '--repo', repo,
-    '--base', 'develop',
-    '--state', 'closed',
-    '--limit', '100',
-    '--json', 'number,title,url,mergedAt',
-  ]);
-
-  if (!result.ok) {
-    console.warn('Unable to fetch merged PRs from GitHub. Falling back to git log subjects.');
-    const raw = run('git log origin/master..origin/develop --pretty=format:"%s"');
-    if (!raw) return [];
-    return raw
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((title) => ({
-        title,
-        number: null,
-        url: null,
-      }));
-  }
-
-  let prs = [];
-  try {
-    prs = JSON.parse(result.output || '[]');
-  } catch {
-    console.warn('Failed to parse PR list. Falling back to git log subjects.');
-    const raw = run('git log origin/master..origin/develop --pretty=format:"%s"');
-    if (!raw) return [];
-    return raw
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((title) => ({
-        title,
-        number: null,
-        url: null,
-      }));
-  }
-
   const mergedChanges = [];
+  const seen = new Set();
 
-  for (const pr of prs) {
-    if (!pr.mergedAt || !pr.number) continue;
+  for (const sha of developOnlyCommits) {
+    const pr = getPullRequestForCommit(repo, sha);
 
-    const view = tryGh([
-      'pr',
-      'view',
-      String(pr.number),
-      '--repo', repo,
-      '--json', 'commits',
-    ]);
-
-    if (!view.ok) {
+    if (!pr || !pr.number || !pr.title || !pr.url) {
       continue;
     }
 
-    let details;
-    try {
-      details = JSON.parse(view.output || '{}');
-    } catch {
+    const key = String(pr.number);
+    if (seen.has(key)) {
       continue;
     }
 
-    const prCommitShas = (details.commits || [])
-      .map((commit) => commit.oid)
-      .filter(Boolean);
-
-    const included = prCommitShas.some((sha) => developOnlySet.has(sha));
-    if (!included) continue;
-
-    mergedChanges.push({
-      title: pr.title,
-      number: pr.number,
-      url: pr.url,
-    });
+    seen.add(key);
+    mergedChanges.push(pr);
   }
 
-  const seen = new Set();
-  return mergedChanges.filter((item) => {
-    const key = `${item.number}-${item.title}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  if (mergedChanges.length > 0) {
+    return mergedChanges;
+  }
+
+  console.warn('Unable to map develop-only commits to PRs. Falling back to git log subjects.');
+  return getMergedChangesFallbackFromGitLog();
 }
 
 function formatChangeForMarkdown(change) {
