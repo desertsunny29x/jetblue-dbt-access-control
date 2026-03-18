@@ -1,112 +1,57 @@
 name: sync-master-back-to-develop
 
 on:
-  pull_request_target:
-    branches:
-      - master
+  workflow_run:
+    workflows: ["sync-release-pr"]
     types:
-      - closed
-  workflow_dispatch:
+      - completed
 
 permissions:
   contents: write
   pull-requests: write
 
-concurrency:
-  group: sync-master-back-to-develop
-  cancel-in-progress: false
-
 jobs:
-  sync-master-back-to-develop:
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      (
-        github.event.pull_request.merged == true &&
-        github.event.pull_request.base.ref == 'master' &&
-        startsWith(github.event.pull_request.head.ref, 'release/deploy_')
-      )
+  sync:
+    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
 
     steps:
-      - name: Print event details
-        run: |
-          echo "event_name=${{ github.event_name }}"
-          echo "default_branch=${{ github.event.repository.default_branch }}"
-          echo "base_ref=${{ github.event.pull_request.base.ref }}"
-          echo "head_ref=${{ github.event.pull_request.head.ref }}"
-          echo "merged=${{ github.event.pull_request.merged }}"
-
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Git identity
+      - name: Setup git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Fetch latest branches
+      - name: Sync master → develop
         run: |
-          git fetch origin --prune
+          git fetch origin
           git checkout develop
           git pull origin develop
-          git checkout master
-          git pull origin master
 
-      - name: Create sync branch from develop
-        id: sync_branch
-        run: |
-          SYNC_BRANCH="sync/master_to_develop_$(date -u +%Y_%m_%d_%H%M%S)"
-          echo "sync_branch=$SYNC_BRANCH" >> "$GITHUB_OUTPUT"
+          BRANCH="sync/master_to_develop_$(date +%s)"
+          git checkout -b $BRANCH
 
-          git checkout develop
-          git checkout -b "$SYNC_BRANCH"
+          git merge origin/master || exit 1
 
-      - name: Merge master into sync branch
-        run: |
-          git merge --no-edit origin/master || {
-            echo "Merge conflict while syncing master back into develop."
-            exit 1
-          }
+          git push origin $BRANCH
 
-      - name: Push sync branch
-        run: |
-          git push -u origin "${{ steps.sync_branch.outputs.sync_branch }}"
-
-      - name: Create or update sync PR
+      - name: Create PR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          EXISTING_PR=$(gh pr list \
-            --base develop \
-            --head "${{ steps.sync_branch.outputs.sync_branch }}" \
-            --state open \
-            --json number \
-            --jq '.[0].number')
-
-          if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
-            echo "Sync PR already exists: #$EXISTING_PR"
-            exit 0
-          fi
-
           gh pr create \
             --base develop \
-            --head "${{ steps.sync_branch.outputs.sync_branch }}" \
-            --title "Sync master back to develop" \
-            --body "Automated PR to sync release documentation and release metadata from \`master\` back into \`develop\`."
+            --head $BRANCH \
+            --title "Sync master → develop" \
+            --body "Automated sync"
 
-      - name: Enable auto-merge for sync PR
+      - name: Enable auto merge
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PR_NUMBER=$(gh pr list \
-            --base develop \
-            --head "${{ steps.sync_branch.outputs.sync_branch }}" \
-            --state open \
-            --json number \
-            --jq '.[0].number')
-
-          if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
-            gh pr merge "$PR_NUMBER" --auto --merge --delete-branch || true
-          fi
+          PR=$(gh pr list --head $BRANCH --json number --jq '.[0].number')
+          gh pr merge $PR --auto --merge --delete-branch || true
