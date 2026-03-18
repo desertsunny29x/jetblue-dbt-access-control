@@ -1,13 +1,16 @@
 name: sync-master-back-to-develop
 
 on:
-  push:
+  pull_request_target:
     branches:
       - master
+    types:
+      - closed
   workflow_dispatch:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: sync-master-back-to-develop
@@ -15,6 +18,12 @@ concurrency:
 
 jobs:
   sync-master-back-to-develop:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.pull_request.merged == true &&
+        startsWith(github.event.pull_request.head.ref, 'release/deploy_')
+      )
     runs-on: ubuntu-latest
 
     steps:
@@ -36,14 +45,59 @@ jobs:
           git checkout master
           git pull origin master
 
-      - name: Sync master into develop
+      - name: Create sync branch from develop
+        id: sync_branch
         run: |
+          SYNC_BRANCH="sync/master_to_develop_$(date -u +%Y_%m_%d_%H%M%S)"
+          echo "sync_branch=$SYNC_BRANCH" >> "$GITHUB_OUTPUT"
+
           git checkout develop
+          git checkout -b "$SYNC_BRANCH"
+
+      - name: Merge master into sync branch
+        run: |
           git merge --no-edit origin/master || {
             echo "Merge conflict while syncing master back into develop."
             exit 1
           }
 
-      - name: Push develop
+      - name: Push sync branch
         run: |
-          git push origin develop
+          git push -u origin "${{ steps.sync_branch.outputs.sync_branch }}"
+
+      - name: Create or update sync PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING_PR=$(gh pr list \
+            --base develop \
+            --head "${{ steps.sync_branch.outputs.sync_branch }}" \
+            --state open \
+            --json number \
+            --jq '.[0].number')
+
+          if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
+            echo "Sync PR already exists: #$EXISTING_PR"
+            exit 0
+          fi
+
+          gh pr create \
+            --base develop \
+            --head "${{ steps.sync_branch.outputs.sync_branch }}" \
+            --title "Sync master back to develop" \
+            --body "Automated PR to sync release documentation and release metadata from \`master\` back into \`develop\`."
+
+      - name: Enable auto-merge for sync PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=$(gh pr list \
+            --base develop \
+            --head "${{ steps.sync_branch.outputs.sync_branch }}" \
+            --state open \
+            --json number \
+            --jq '.[0].number')
+
+          if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
+            gh pr merge "$PR_NUMBER" --auto --merge --delete-branch || true
+          fi
