@@ -22,11 +22,20 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (
         github.event.pull_request.merged == true &&
+        github.event.pull_request.base.ref == 'master' &&
         startsWith(github.event.pull_request.head.ref, 'release/deploy_')
       )
     runs-on: ubuntu-latest
 
     steps:
+      - name: Print event details
+        run: |
+          echo "event_name=${{ github.event_name }}"
+          echo "default_branch=${{ github.event.repository.default_branch }}"
+          echo "base_ref=${{ github.event.pull_request.base.ref }}"
+          echo "head_ref=${{ github.event.pull_request.head.ref }}"
+          echo "merged=${{ github.event.pull_request.merged }}"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
