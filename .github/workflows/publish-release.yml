@@ -5,15 +5,19 @@ on:
     workflows: ["sync-release-pr"]
     types:
       - completed
+  workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: read
 
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
 jobs:
   publish-release:
-    if: >
-      github.event.workflow_run.conclusion == 'success'
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
 
     steps:
@@ -36,36 +40,90 @@ jobs:
           PR_JSON=$(gh pr list \
             --base master \
             --state merged \
-            --limit 10 \
+            --limit 20 \
             --json number,title,headRefName,mergedAt \
             --jq '[.[] | select(.headRefName | startswith("release/deploy_"))] | sort_by(.mergedAt) | last')
 
           if [ -z "$PR_JSON" ] || [ "$PR_JSON" = "null" ]; then
-            echo "No release PR found"
-            exit 1
+            echo "No merged release PR found. Exiting."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          HEAD=$(echo "$PR_JSON" | jq -r '.headRefName')
+          BRANCH=$(echo "$PR_JSON" | jq -r '.headRefName')
           TITLE=$(echo "$PR_JSON" | jq -r '.title')
+          MERGED_AT=$(echo "$PR_JSON" | jq -r '.mergedAt')
 
-          echo "branch=$HEAD" >> $GITHUB_OUTPUT
-          echo "title=$TITLE" >> $GITHUB_OUTPUT
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "merged_at=$MERGED_AT" >> "$GITHUB_OUTPUT"
 
-      - name: Generate tag
+      - name: Derive tag from release branch
+        if: steps.pr.outputs.found == 'true'
         id: tag
         run: |
           TAG=$(echo "${{ steps.pr.outputs.branch }}" | sed 's#^release/deploy_#v#')
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Using tag: $TAG"
+
+      - name: Check whether tag already exists
+        if: steps.pr.outputs.found == 'true'
+        id: tag_check
+        run: |
+          git fetch --tags
+          if git rev-parse -q --verify "refs/tags/${{ steps.tag.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag already exists: ${{ steps.tag.outputs.tag }}"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check whether release already exists
+        if: steps.pr.outputs.found == 'true'
+        id: release_check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.tag.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release already exists: ${{ steps.tag.outputs.tag }}"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create tag
+        if: steps.pr.outputs.found == 'true' && steps.tag_check.outputs.exists == 'false'
         run: |
           git tag "${{ steps.tag.outputs.tag }}"
-          git push origin "${{ steps.tag.outputs.tag }}" || true
+          git push origin "${{ steps.tag.outputs.tag }}"
 
-      - name: Create Release
+      - name: Build release notes
+        if: steps.pr.outputs.found == 'true' && steps.release_check.outputs.exists == 'false'
+        run: |
+          cat > release_notes.md <<EOF
+          ## Automated Production Release
+
+          - Release Tag: \`${{ steps.tag.outputs.tag }}\`
+          - Release PR Title: \`${{ steps.pr.outputs.title }}\`
+          - Release Branch: \`${{ steps.pr.outputs.branch }}\`
+          - Merged At: \`${{ steps.pr.outputs.merged_at }}\`
+          - Target Branch: \`master\`
+
+          This release was published automatically after the release PR was merged into \`master\`.
+          EOF
+
+      - name: Create GitHub Release
+        if: steps.pr.outputs.found == 'true' && steps.release_check.outputs.exists == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${{ steps.tag.outputs.tag }}" \
             --title "Release ${{ steps.tag.outputs.tag }}" \
+            --notes-file release_notes.md \
             --generate-notes
+
+      - name: Skip duplicate release
+        if: steps.pr.outputs.found == 'true' && steps.release_check.outputs.exists == 'true'
+        run: |
+          echo "Release already exists for tag ${{ steps.tag.outputs.tag }}. Skipping."
