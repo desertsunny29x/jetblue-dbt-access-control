@@ -194,13 +194,120 @@ function getVersion(releaseBranch) {
   return `v${date}_${releaseNumber}`;
 }
 
-function getMergedChanges() {
-  const raw = run('git log origin/master..origin/develop --pretty=format:"%s"');
-  if (!raw) return [];
-  return raw
+function getDevelopOnlyCommits() {
+  const raw = tryRun('git log origin/master..origin/develop --pretty=format:"%H"');
+  if (!raw.ok || !raw.output) return [];
+  return raw.output
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function getMergedChanges() {
+  const repo = process.env.GITHUB_REPOSITORY;
+  const developOnlyCommits = getDevelopOnlyCommits();
+
+  if (developOnlyCommits.length === 0) {
+    return [];
+  }
+
+  const developOnlySet = new Set(developOnlyCommits);
+
+  const result = tryGh([
+    'pr',
+    'list',
+    '--repo', repo,
+    '--base', 'develop',
+    '--state', 'closed',
+    '--limit', '100',
+    '--json', 'number,title,url,mergedAt',
+  ]);
+
+  if (!result.ok) {
+    console.warn('Unable to fetch merged PRs from GitHub. Falling back to git log subjects.');
+    const raw = run('git log origin/master..origin/develop --pretty=format:"%s"');
+    if (!raw) return [];
+    return raw
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((title) => ({
+        title,
+        number: null,
+        url: null,
+      }));
+  }
+
+  let prs = [];
+  try {
+    prs = JSON.parse(result.output || '[]');
+  } catch {
+    console.warn('Failed to parse PR list. Falling back to git log subjects.');
+    const raw = run('git log origin/master..origin/develop --pretty=format:"%s"');
+    if (!raw) return [];
+    return raw
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((title) => ({
+        title,
+        number: null,
+        url: null,
+      }));
+  }
+
+  const mergedChanges = [];
+
+  for (const pr of prs) {
+    if (!pr.mergedAt || !pr.number) continue;
+
+    const view = tryGh([
+      'pr',
+      'view',
+      String(pr.number),
+      '--repo', repo,
+      '--json', 'commits',
+    ]);
+
+    if (!view.ok) {
+      continue;
+    }
+
+    let details;
+    try {
+      details = JSON.parse(view.output || '{}');
+    } catch {
+      continue;
+    }
+
+    const prCommitShas = (details.commits || [])
+      .map((commit) => commit.oid)
+      .filter(Boolean);
+
+    const included = prCommitShas.some((sha) => developOnlySet.has(sha));
+    if (!included) continue;
+
+    mergedChanges.push({
+      title: pr.title,
+      number: pr.number,
+      url: pr.url,
+    });
+  }
+
+  const seen = new Set();
+  return mergedChanges.filter((item) => {
+    const key = `${item.number}-${item.title}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function formatChangeForMarkdown(change) {
+  if (change.number && change.url) {
+    return `- ${change.title} ([#${change.number}](${change.url}))`;
+  }
+  return `- ${change.title}`;
 }
 
 function updateChangelog(changes, version) {
@@ -224,7 +331,7 @@ function updateChangelog(changes, version) {
     lines.push('- No application changes detected between develop and master.');
   } else {
     for (const change of changes) {
-      lines.push(`- ${change}`);
+      lines.push(formatChangeForMarkdown(change));
     }
   }
 
@@ -263,7 +370,7 @@ function updateReadme(changes, version, releaseBranch) {
 
   const changesBlock = changes.length === 0
     ? '- No application changes detected between develop and master.'
-    : changes.map((item) => `- ${item}`).join('\n');
+    : changes.map((item) => formatChangeForMarkdown(item)).join('\n');
 
   const section = [
     '## Latest Automated Release',
@@ -350,7 +457,7 @@ function buildPrBody(version, releaseBranch, changes) {
     lines.push('- No application changes detected between develop and master.');
   } else {
     for (const change of changes) {
-      lines.push(`- ${change}`);
+      lines.push(formatChangeForMarkdown(change));
     }
   }
 
