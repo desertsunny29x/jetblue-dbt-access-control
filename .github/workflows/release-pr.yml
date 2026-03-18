@@ -1,0 +1,58 @@
+name: Sync develop to master release PR
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: release-pr-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sync-release-pr:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'develop')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Generate or update release PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_BASE: master
+          RELEASE_HEAD_SOURCE: develop
+          RELEASE_BRANCH_PREFIX: automation/release
+          README_MARKER_START: <!-- AUTO-RELEASE:START -->
+          README_MARKER_END: <!-- AUTO-RELEASE:END -->
+          CHANGELOG_PATH: CHANGELOG.md
+          README_PATH: README.md
+          RELEASE_LABELS: auto-release,bot
+          AUTO_MERGE: 'false'
+        run: node .github/scripts/sync-develop-to-master.mjs

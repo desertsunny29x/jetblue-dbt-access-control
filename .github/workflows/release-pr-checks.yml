@@ -1,0 +1,44 @@
+name: Validate automated release PR
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-release-pr:
+    if: startsWith(github.head_ref, 'automation/release-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate generated files and markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f CHANGELOG.md
+          test -f README.md
+          grep -q '<!-- AUTO-RELEASE:START -->' README.md
+          grep -q '<!-- AUTO-RELEASE:END -->' README.md
+          grep -q '^## ' CHANGELOG.md
+
+      - name: Run repository tests if present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f package.json ]; then
+            npm ci
+            npm test --if-present
+          elif [ -f requirements.txt ]; then
+            python -m pip install -r requirements.txt
+            python -m pip install pytest
+            pytest -q
+          else
+            echo "No standard test manifest found. Add your repo-specific tests here."
+          fi
