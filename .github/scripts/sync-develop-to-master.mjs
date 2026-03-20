@@ -139,15 +139,8 @@ function shouldIncludePullRequest(pr) {
   if (!pr) return false;
 
   const title = pr.title || '';
-  const headRefName =
-    pr.headRefName ||
-    (pr.head && pr.head.ref) ||
-    '';
-
-  const baseRefName =
-    pr.baseRefName ||
-    (pr.base && pr.base.ref) ||
-    '';
+  const headRefName = pr.headRefName || (pr.head && pr.head.ref) || '';
+  const baseRefName = pr.baseRefName || (pr.base && pr.base.ref) || '';
 
   if (!title) return false;
   if (isIgnoredTitle(title)) return false;
@@ -199,7 +192,7 @@ function getNextReleaseSequence(date) {
         }
       }
     } catch {
-      // ignore and continue
+      // ignore
     }
   }
 
@@ -422,6 +415,42 @@ function getMergedChanges() {
   return getMergedChangesFallbackFromGitLog();
 }
 
+function getRecentMergedUserPullRequests(limit = 5) {
+  const repo = process.env.GITHUB_REPOSITORY;
+
+  const result = tryGh([
+    'pr',
+    'list',
+    '--repo', repo,
+    '--base', 'develop',
+    '--state', 'merged',
+    '--limit', '100',
+    '--json', 'number,title,url,mergedAt,assignees,headRefName,baseRefName',
+  ]);
+
+  if (!result.ok || !result.output) {
+    return [];
+  }
+
+  try {
+    const prs = JSON.parse(result.output || '[]')
+      .map((pr) => ({
+        title: pr.title || null,
+        number: pr.number || null,
+        url: pr.url || null,
+        mergedAt: pr.mergedAt || null,
+        assignees: normalizeAssignees(pr.assignees),
+        headRefName: pr.headRefName || null,
+        baseRefName: pr.baseRefName || null,
+      }))
+      .filter((pr) => shouldIncludePullRequest(pr));
+
+    return sortChangesByMergedAtDesc(prs).slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
 function formatChangeForMarkdown(change) {
   if (change.number && change.url) {
     return `- ${change.title} ([#${change.number}](${change.url}))`;
@@ -451,6 +480,38 @@ function formatRecentReadmeEntry(change) {
   return `- ${change.title} ${prLink} | Assignee: \`${formatAssigneeList(change)}\` | Merged: \`${formatDateTime(change.mergedAt)}\``;
 }
 
+function sanitizeChangelogContent(content) {
+  const lines = content.split('\n');
+  const cleaned = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (/^###\s+Release\s+/i.test(trimmed)) continue;
+    if (/^Release\s+v/i.test(trimmed)) continue;
+    if (/^-?\s*Sync master back to develop/i.test(trimmed)) continue;
+
+    cleaned.push(line);
+  }
+
+  return cleaned.join('\n');
+}
+
+function dedupePreserveOrder(lines) {
+  const seen = new Set();
+  const output = [];
+
+  for (const line of lines) {
+    const key = line.trim();
+    if (!key) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(line);
+  }
+
+  return output;
+}
+
 function updateChangelog(changes) {
   const filePath = 'CHANGELOG.md';
   ensureFileExists(filePath, '# Changelog\n\n');
@@ -462,12 +523,14 @@ function updateChangelog(changes) {
     existing = '# Changelog\n\n';
   }
 
-  const newLines = changes
-    .map((change) => formatChangeForMarkdown(change))
-    .filter((line, index, arr) => arr.indexOf(line) === index)
-    .filter((line) => !existing.includes(line));
+  existing = sanitizeChangelogContent(existing);
+
+  const newLines = dedupePreserveOrder(
+    sortChangesByMergedAtDesc(changes).map((change) => formatChangeForMarkdown(change))
+  );
 
   if (newLines.length === 0) {
+    fs.writeFileSync(filePath, existing, 'utf-8');
     return;
   }
 
@@ -479,9 +542,16 @@ function updateChangelog(changes) {
 
   if (sectionRegex.test(existing)) {
     existing = existing.replace(sectionRegex, (match, heading, body) => {
-      const trimmedBody = body.trimEnd();
-      const bodyPrefix = trimmedBody ? `${trimmedBody}\n` : '';
-      return `${heading}${bodyPrefix}${newLines.join('\n')}\n\n`;
+      const existingLines = body
+        .split('\n')
+        .map((line) => line.trimEnd())
+        .filter((line) => line.trim())
+        .filter((line) => !/^###\s+Release\s+/i.test(line.trim()))
+        .filter((line) => !/^Release\s+v/i.test(line.trim()))
+        .filter((line) => !/^-?\s*Sync master back to develop/i.test(line.trim()));
+
+      const mergedLines = dedupePreserveOrder([...newLines, ...existingLines]);
+      return `${heading}${mergedLines.join('\n')}\n\n`;
     });
   } else {
     const headerMatch = existing.match(/^# .*\n+/);
@@ -497,7 +567,7 @@ function updateChangelog(changes) {
   fs.writeFileSync(filePath, existing, 'utf-8');
 }
 
-function updateReadme(changes, releaseTag, releaseBranch) {
+function updateReadme(releaseTag, releaseBranch) {
   const filePath = 'README.md';
   ensureFileExists(
     filePath,
@@ -517,9 +587,9 @@ function updateReadme(changes, releaseTag, releaseBranch) {
   const branchBadge = `![Branch](https://img.shields.io/badge/branch-${releaseBranch.replace(/\//g, '%2F')}-orange)`;
   const automationBadge = '![Release Flow](https://img.shields.io/badge/release-automated-blue)';
 
-  const recentChanges = sortChangesByMergedAtDesc(changes).slice(0, 5);
+  const recentChanges = getRecentMergedUserPullRequests(5);
   const recentChangesBlock = recentChanges.length === 0
-    ? '- No recent user PRs found for this release.'
+    ? '- No recent merged user PRs found.'
     : recentChanges.map((item) => formatRecentReadmeEntry(item)).join('\n');
 
   const section = [
@@ -599,7 +669,7 @@ function buildPrBody(releaseTag, releaseBranch, changes) {
   if (changes.length === 0) {
     lines.push('- No user PR changes detected between develop and master.');
   } else {
-    for (const change of changes) {
+    for (const change of sortChangesByMergedAtDesc(changes)) {
       lines.push(formatChangeForMarkdown(change));
     }
   }
@@ -706,7 +776,7 @@ function main() {
   const releaseTag = getTagFromReleaseBranch(releaseBranch);
 
   updateChangelog(changes);
-  updateReadme(changes, releaseTag, releaseBranch);
+  updateReadme(releaseTag, releaseBranch);
   commitAndPush(releaseTag, releaseBranch);
 
   const prNumber = createOrUpdatePr(releaseTag, releaseBranch, changes);
