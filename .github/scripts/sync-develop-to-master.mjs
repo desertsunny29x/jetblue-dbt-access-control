@@ -56,14 +56,6 @@ function runGh(args) {
     console.error(`\nGitHub CLI command failed: gh ${args.join(' ')}`);
     if (stdout) console.error(`\nSTDOUT:\n${stdout}`);
     if (stderr) console.error(`\nSTDERR:\n${stderr}`);
-
-    if (stderr.includes('GitHub Actions is not permitted to create or approve pull requests')) {
-      console.error(
-        '\nRepository setting required: Settings > Actions > General > Workflow permissions > ' +
-        '"Read and write permissions" and enable "Allow GitHub Actions to create and approve pull requests".'
-      );
-    }
-
     process.exit(1);
   }
 
@@ -133,31 +125,90 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function getNextReleaseBranch() {
-  const date = getFormattedDate();
-  const base = sanitizeBranchName(`release/deploy_${date}`);
+function isIgnoredTitle(title = '') {
+  const normalized = title.trim().toLowerCase();
+  return (
+    normalized === 'sync master back to develop' ||
+    normalized.startsWith('sync master back to develop') ||
+    normalized.startsWith('release ') ||
+    normalized.startsWith('release:')
+  );
+}
 
-  const branchesRaw = run('git ls-remote --heads origin');
-  const branches = branchesRaw
-    .split('\n')
-    .map((line) => line.split('\t')[1])
-    .filter(Boolean)
-    .map((ref) => ref.replace('refs/heads/', ''));
+function shouldIncludePullRequest(pr) {
+  if (!pr) return false;
 
-  const regex = new RegExp(`^${escapeRegExp(base)}_(\\d+)$`);
+  const title = pr.title || '';
+  const headRefName =
+    pr.headRefName ||
+    (pr.head && pr.head.ref) ||
+    '';
+
+  const baseRefName =
+    pr.baseRefName ||
+    (pr.base && pr.base.ref) ||
+    '';
+
+  if (!title) return false;
+  if (isIgnoredTitle(title)) return false;
+  if (headRefName.startsWith('sync/master_to_develop_')) return false;
+  if (headRefName.startsWith('release/deploy_') && baseRefName === 'master') return false;
+
+  return true;
+}
+
+function getNextReleaseSequence(date) {
   let max = 0;
+  const branchRegex = new RegExp(`^release/deploy_${escapeRegExp(date)}_(\\d+)$`);
+  const tagRegex = new RegExp(`^v${date.replace(/_/g, '\\.') }\\.(\\d+)$`);
 
-  for (const branch of branches) {
-    const match = branch.match(regex);
-    if (match) {
-      const num = parseInt(match[1], 10);
-      if (!Number.isNaN(num) && num > max) {
-        max = num;
+  const prResult = tryGh([
+    'pr',
+    'list',
+    '--base', 'master',
+    '--state', 'all',
+    '--limit', '200',
+    '--json', 'headRefName',
+  ]);
+
+  if (prResult.ok) {
+    try {
+      const prs = JSON.parse(prResult.output || '[]');
+      for (const pr of prs) {
+        const ref = pr.headRefName || '';
+        const match = ref.match(branchRegex);
+        if (match) {
+          const value = parseInt(match[1], 10);
+          if (!Number.isNaN(value) && value > max) {
+            max = value;
+          }
+        }
+      }
+    } catch {
+      // ignore and continue
+    }
+  }
+
+  const tagsResult = tryRun('git tag --list');
+  if (tagsResult.ok && tagsResult.output) {
+    for (const tag of tagsResult.output.split('\n').map((x) => x.trim()).filter(Boolean)) {
+      const match = tag.match(tagRegex);
+      if (match) {
+        const value = parseInt(match[1], 10);
+        if (!Number.isNaN(value) && value > max) {
+          max = value;
+        }
       }
     }
   }
 
-  return `${base}_${max + 1}`;
+  return max + 1;
+}
+
+function getNextReleaseBranch() {
+  const date = getFormattedDate();
+  const sequence = getNextReleaseSequence(date);
+  return sanitizeBranchName(`release/deploy_${date}_${sequence}`);
 }
 
 function createReleaseBranchFromMaster() {
@@ -194,26 +245,23 @@ function mergeDevelopIntoReleaseBranch() {
   console.error('Merge conflict detected while merging develop into the release branch.');
   if (mergeResult.stdout) console.error(`\nSTDOUT:\n${mergeResult.stdout}`);
   if (mergeResult.stderr) console.error(`\nSTDERR:\n${mergeResult.stderr}`);
-  console.error(
-    'Resolve the conflicts in develop vs master first, or rely on the post-release master-to-develop sync workflow to keep both branches aligned.'
-  );
   process.exit(1);
 }
 
-function getReleaseNumber(releaseBranch) {
-  const match = releaseBranch.match(/_(\d+)$/);
-  return match ? match[1] : '1';
-}
+function getTagFromReleaseBranch(releaseBranch) {
+  const match = releaseBranch.match(/^release\/deploy_(\d{4})_(\d{2})_(\d{2})_(\d+)$/);
+  if (!match) {
+    return `v${getFormattedDate().replace(/_/g, '.')}.1`;
+  }
 
-function getVersion(releaseBranch) {
-  const date = getFormattedDate();
-  const releaseNumber = getReleaseNumber(releaseBranch);
-  return `v${date}_${releaseNumber}`;
+  const [, yyyy, mm, dd, seq] = match;
+  return `v${yyyy}.${mm}.${dd}.${seq}`;
 }
 
 function getDevelopOnlyCommits() {
   const raw = tryRun('git log origin/master..origin/develop --pretty=format:"%H"');
   if (!raw.ok || !raw.output) return [];
+
   return raw.output
     .split('\n')
     .map((line) => line.trim())
@@ -242,13 +290,19 @@ function getPullRequestForCommit(repo, sha) {
     return null;
   }
 
-  const mergedPr = prs.find((pr) => pr && pr.merged_at) || prs[0];
-  if (!mergedPr) return null;
+  const filtered = prs.filter((pr) => shouldIncludePullRequest(pr));
+  const chosen = filtered.find((pr) => pr && pr.merged_at) || filtered[0];
+
+  if (!chosen) {
+    return null;
+  }
 
   return {
-    title: mergedPr.title || null,
-    number: mergedPr.number || null,
-    url: mergedPr.html_url || null,
+    title: chosen.title || null,
+    number: chosen.number || null,
+    url: chosen.html_url || null,
+    headRefName: chosen.head && chosen.head.ref ? chosen.head.ref : null,
+    baseRefName: chosen.base && chosen.base.ref ? chosen.base.ref : null,
   };
 }
 
@@ -260,6 +314,7 @@ function getMergedChangesFallbackFromGitLog() {
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
+    .filter((title) => !isIgnoredTitle(title))
     .map((title) => ({
       title,
       number: null,
@@ -285,6 +340,10 @@ function getMergedChanges() {
       continue;
     }
 
+    if (!shouldIncludePullRequest(pr)) {
+      continue;
+    }
+
     const key = String(pr.number);
     if (seen.has(key)) {
       continue;
@@ -298,7 +357,7 @@ function getMergedChanges() {
     return mergedChanges;
   }
 
-  console.warn('Unable to map develop-only commits to PRs. Falling back to git log subjects.');
+  console.warn('Unable to map develop-only commits to user PRs. Falling back to git log subjects.');
   return getMergedChangesFallbackFromGitLog();
 }
 
@@ -309,45 +368,53 @@ function formatChangeForMarkdown(change) {
   return `- ${change.title}`;
 }
 
-function updateChangelog(changes, version) {
+function updateChangelog(changes) {
   const filePath = 'CHANGELOG.md';
   ensureFileExists(filePath, '# Changelog\n\n');
 
+  const displayDate = getDisplayDate();
   let existing = fs.readFileSync(filePath, 'utf-8');
+
   if (!existing.trim()) {
     existing = '# Changelog\n\n';
   }
 
-  const displayDate = getDisplayDate();
-  const lines = [
-    `## ${displayDate}`,
-    '',
-    `### Release ${version}`,
-    '',
-  ];
+  const newLines = changes
+    .map((change) => formatChangeForMarkdown(change))
+    .filter((line, index, arr) => arr.indexOf(line) === index)
+    .filter((line) => !existing.includes(line));
 
-  if (changes.length === 0) {
-    lines.push('- No application changes detected between develop and master.');
+  if (newLines.length === 0) {
+    return;
+  }
+
+  const dateHeader = `## ${displayDate}`;
+  const sectionRegex = new RegExp(
+    `(^${escapeRegExp(dateHeader)}\\n)([\\s\\S]*?)(?=^## \\d{4}-\\d{2}-\\d{2}\\n|\\Z)`,
+    'm'
+  );
+
+  if (sectionRegex.test(existing)) {
+    existing = existing.replace(sectionRegex, (match, heading, body) => {
+      const trimmedBody = body.trimEnd();
+      const bodyPrefix = trimmedBody ? `${trimmedBody}\n` : '';
+      return `${heading}${bodyPrefix}${newLines.join('\n')}\n\n`;
+    });
   } else {
-    for (const change of changes) {
-      lines.push(formatChangeForMarkdown(change));
+    const headerMatch = existing.match(/^# .*\n+/);
+    if (headerMatch) {
+      const header = headerMatch[0];
+      const rest = existing.slice(header.length).trimStart();
+      existing = `${header}${dateHeader}\n${newLines.join('\n')}\n\n${rest ? `${rest}\n` : ''}`;
+    } else {
+      existing = `# Changelog\n\n${dateHeader}\n${newLines.join('\n')}\n\n${existing}`;
     }
   }
 
-  lines.push('');
-  const entry = `${lines.join('\n')}\n`;
-
-  const headerMatch = existing.match(/^# .*\n+/);
-  if (headerMatch) {
-    const header = headerMatch[0];
-    const rest = existing.slice(header.length).trimStart();
-    fs.writeFileSync(filePath, `${header}${entry}${rest ? `${rest}\n` : ''}`, 'utf-8');
-  } else {
-    fs.writeFileSync(filePath, `# Changelog\n\n${entry}${existing}`, 'utf-8');
-  }
+  fs.writeFileSync(filePath, existing, 'utf-8');
 }
 
-function updateReadme(changes, version, releaseBranch) {
+function updateReadme(changes, releaseTag, releaseBranch) {
   const filePath = 'README.md';
   ensureFileExists(
     filePath,
@@ -364,27 +431,27 @@ function updateReadme(changes, version, releaseBranch) {
 
   const ownerRepo = process.env.GITHUB_REPOSITORY;
   const prStatusBadge = '![PR Status](https://img.shields.io/badge/release_pr-open-blue)';
-  const releaseBadge = `![Release](https://img.shields.io/badge/release-${version}-green)`;
+  const releaseBadge = `![Release](https://img.shields.io/badge/release-${releaseTag}-green)`;
   const branchBadge = `![Branch](https://img.shields.io/badge/branch-${releaseBranch.replace(/\//g, '%2F')}-orange)`;
 
   const changesBlock = changes.length === 0
-    ? '- No application changes detected between develop and master.'
+    ? '- No user PR changes detected between develop and master.'
     : changes.map((item) => formatChangeForMarkdown(item)).join('\n');
 
   const section = [
-    '## Latest Automated Release',
+    '## Latest Release',
     '',
     `${prStatusBadge} ${releaseBadge} ${branchBadge}`,
     '',
     `- Repository: \`${ownerRepo}\``,
-    `- Release Version: \`${version}\``,
+    `- Release Date: \`${getDisplayDate()}\``,
+    `- Release Tag: \`${releaseTag}\``,
     `- Release Branch: \`${releaseBranch}\``,
     '- Source Branch: `develop`',
     '- Target Branch: `master`',
-    `- Generated On: \`${new Date().toISOString()}\``,
     '',
     '<details>',
-    '<summary>Included Changes</summary>',
+    '<summary>Included User PRs</summary>',
     '',
     changesBlock,
     '',
@@ -407,7 +474,7 @@ function hasTrackedFileChanges() {
   return Boolean(status);
 }
 
-function commitAndPush(version, releaseBranch) {
+function commitAndPush(releaseTag, releaseBranch) {
   run('git add CHANGELOG.md README.md');
 
   if (!hasTrackedFileChanges()) {
@@ -415,7 +482,7 @@ function commitAndPush(version, releaseBranch) {
     return false;
   }
 
-  run(`git commit -m "chore: release ${version}"`);
+  run(`git commit -m "chore: release ${releaseTag}"`);
   run(`git push -u origin ${releaseBranch}`);
   return true;
 }
@@ -435,25 +502,21 @@ function getExistingPrNumber(releaseBranch) {
   return result.output || null;
 }
 
-function buildPrBody(version, releaseBranch, changes) {
+function buildPrBody(releaseTag, releaseBranch, changes) {
   const lines = [
     '## Automated Release PR',
     '',
-    `- Release Version: \`${version}\``,
+    `- Release Tag: \`${releaseTag}\``,
     `- Release Branch: \`${releaseBranch}\``,
+    `- Release Date: \`${getDisplayDate()}\``,
     '- Source Branch: `develop`',
     '- Target Branch: `master`',
     '',
-    '### Validation',
-    '- Generated automatically after changes were merged into `develop`.',
-    '- Includes updates to `CHANGELOG.md` and `README.md`.',
-    '- Designed to respect protected `master` branch rules by opening a PR instead of pushing directly.',
-    '',
-    '### Changes Included',
+    '### Included User PRs',
   ];
 
   if (changes.length === 0) {
-    lines.push('- No application changes detected between develop and master.');
+    lines.push('- No user PR changes detected between develop and master.');
   } else {
     for (const change of changes) {
       lines.push(formatChangeForMarkdown(change));
@@ -472,10 +535,10 @@ function writeTempPrBody(prBody) {
   return tempFile;
 }
 
-function createOrUpdatePr(version, releaseBranch, changes) {
+function createOrUpdatePr(releaseTag, releaseBranch, changes) {
   const existingPrNumber = getExistingPrNumber(releaseBranch);
-  const title = `Release ${version}`;
-  const prBody = buildPrBody(version, releaseBranch, changes);
+  const title = `Release ${releaseTag}`;
+  const prBody = buildPrBody(releaseTag, releaseBranch, changes);
   const bodyFile = writeTempPrBody(prBody);
 
   try {
@@ -530,9 +593,6 @@ function enableAutoMerge(prNumber) {
     console.warn(`Unable to enable auto-merge for PR #${prNumber}.`);
     if (result.stdout) console.warn(`\nSTDOUT:\n${result.stdout}`);
     if (result.stderr) console.warn(`\nSTDERR:\n${result.stderr}`);
-    console.warn(
-      'Check repository settings: auto-merge must be enabled, merge method must be allowed, and branch deletion must be permitted.'
-    );
     return;
   }
 
@@ -546,7 +606,7 @@ function main() {
   run('git config user.name "github-actions[bot]"');
   run('git config user.email "41898282+github-actions[bot]@users.noreply.github.com"');
 
-  run('git fetch origin --prune');
+  run('git fetch origin --prune --tags');
   run('git checkout develop');
   run('git pull origin develop');
   run('git checkout master');
@@ -555,20 +615,20 @@ function main() {
   const changes = getMergedChanges();
 
   if (changes.length === 0) {
-    console.log('No new changes detected between develop and master. Skipping release PR.');
+    console.log('No new user PR changes detected between develop and master. Skipping release PR.');
     process.exit(0);
   }
 
   const releaseBranch = createReleaseBranchFromMaster();
   mergeDevelopIntoReleaseBranch();
 
-  const version = getVersion(releaseBranch);
+  const releaseTag = getTagFromReleaseBranch(releaseBranch);
 
-  updateChangelog(changes, version);
-  updateReadme(changes, version, releaseBranch);
-  commitAndPush(version, releaseBranch);
+  updateChangelog(changes);
+  updateReadme(changes, releaseTag, releaseBranch);
+  commitAndPush(releaseTag, releaseBranch);
 
-  const prNumber = createOrUpdatePr(version, releaseBranch, changes);
+  const prNumber = createOrUpdatePr(releaseTag, releaseBranch, changes);
 
   if (prNumber) {
     enableAutoMerge(prNumber);

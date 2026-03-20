@@ -1,22 +1,21 @@
 
 
 <!-- RELEASE_START -->
-## Latest Automated Release
+## Latest Release
 
-![PR Status](https://img.shields.io/badge/release_pr-open-blue) ![Release](https://img.shields.io/badge/release-v2026_03_20_1-green) ![Branch](https://img.shields.io/badge/branch-release%2Fdeploy_2026_03_20_1-orange)
+![PR Status](https://img.shields.io/badge/release_pr-open-blue) ![Release](https://img.shields.io/badge/release-v2026.03.20.2-green) ![Branch](https://img.shields.io/badge/branch-release%2Fdeploy_2026_03_20_2-orange)
 
 - Repository: `desertsunny29x/jetblue-dbt-access-control`
-- Release Version: `v2026_03_20_1`
-- Release Branch: `release/deploy_2026_03_20_1`
+- Release Date: `2026-03-20`
+- Release Tag: `v2026.03.20.2`
+- Release Branch: `release/deploy_2026_03_20_2`
 - Source Branch: `develop`
 - Target Branch: `master`
-- Generated On: `2026-03-20T11:40:02.584Z`
 
 <details>
-<summary>Included Changes</summary>
+<summary>Included User PRs</summary>
 
-- Access Control - Update file1.txt ([#54](https://github.com/desertsunny29x/jetblue-dbt-access-control/pull/54))
-- Sync master back to develop ([#53](https://github.com/desertsunny29x/jetblue-dbt-access-control/pull/53))
+- Access Control - Fix/release ([#57](https://github.com/desertsunny29x/jetblue-dbt-access-control/pull/57))
 
 </details>
 <!-- RELEASE_END -->
