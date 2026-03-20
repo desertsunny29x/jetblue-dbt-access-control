@@ -1,4 +1,2 @@
 file1
-add text
-more text
-a new change
+
