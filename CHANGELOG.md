@@ -6,6 +6,7 @@
 
 - Access Control - Update file1.txt ([#54](https://github.com/desertsunny29x/jetblue-dbt-access-control/pull/54))
 - Sync master back to develop ([#53](https://github.com/desertsunny29x/jetblue-dbt-access-control/pull/53))
+- Access Control - Fix/release ([#57](https://github.com/desertsunny29x/jetblue-dbt-access-control/pull/57))
 
 ## 2026-03-20
 
