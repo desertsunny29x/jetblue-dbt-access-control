@@ -52,17 +52,30 @@ jobs:
           git checkout -b "${{ steps.sync_branch.outputs.branch }}"
 
       - name: Merge master into sync branch
+        id: merge_step
         run: |
           git merge --no-edit origin/master || {
             echo "Merge conflict while syncing master back into develop."
             exit 1
           }
 
+      - name: Check whether anything changed
+        id: diff_check
+        run: |
+          if git diff --quiet origin/develop...HEAD; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "No commits to sync from master into develop."
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Push sync branch
+        if: steps.diff_check.outputs.has_changes == 'true'
         run: |
           git push -u origin "${{ steps.sync_branch.outputs.branch }}"
 
       - name: Check for existing sync PR
+        if: steps.diff_check.outputs.has_changes == 'true'
         id: existing_pr
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -83,7 +96,7 @@ jobs:
           fi
 
       - name: Create sync PR
-        if: steps.existing_pr.outputs.exists == 'false'
+        if: steps.diff_check.outputs.has_changes == 'true' && steps.existing_pr.outputs.exists == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -94,6 +107,7 @@ jobs:
             --body "Automated PR to sync release documentation and release metadata from master back into develop."
 
       - name: Get sync PR number
+        if: steps.diff_check.outputs.has_changes == 'true'
         id: pr_number
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -114,7 +128,13 @@ jobs:
           echo "Sync PR number: $PR_NUMBER"
 
       - name: Enable auto merge
+        if: steps.diff_check.outputs.has_changes == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr merge "${{ steps.pr_number.outputs.number }}" --auto --merge --delete-branch || true
+
+      - name: Skip when nothing changed
+        if: steps.diff_check.outputs.has_changes == 'false'
+        run: |
+          echo "Nothing to sync. Skipping PR creation."
