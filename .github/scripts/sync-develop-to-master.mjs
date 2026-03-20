@@ -157,10 +157,24 @@ function shouldIncludePullRequest(pr) {
   return true;
 }
 
+function normalizeAssignees(rawAssignees) {
+  if (!Array.isArray(rawAssignees)) return [];
+
+  return rawAssignees
+    .map((assignee) => {
+      if (!assignee) return null;
+      if (typeof assignee === 'string') return assignee.trim() || null;
+      if (assignee.login) return String(assignee.login).trim() || null;
+      if (assignee.name) return String(assignee.name).trim() || null;
+      return null;
+    })
+    .filter(Boolean);
+}
+
 function getNextReleaseSequence(date) {
   let max = 0;
   const branchRegex = new RegExp(`^release/deploy_${escapeRegExp(date)}_(\\d+)$`);
-  const tagRegex = new RegExp(`^v${date.replace(/_/g, '\\.') }\\.(\\d+)$`);
+  const tagRegex = new RegExp(`^v${date.replace(/_/g, '\\.')}\\.(\\d+)$`);
 
   const prResult = tryGh([
     'pr',
@@ -268,6 +282,36 @@ function getDevelopOnlyCommits() {
     .filter(Boolean);
 }
 
+function enrichPullRequestDetails(repo, prNumber) {
+  const result = tryGh([
+    'pr',
+    'view',
+    String(prNumber),
+    '--repo', repo,
+    '--json', 'number,title,url,mergedAt,assignees,headRefName,baseRefName',
+  ]);
+
+  if (!result.ok || !result.output) {
+    return null;
+  }
+
+  try {
+    const pr = JSON.parse(result.output);
+
+    return {
+      title: pr.title || null,
+      number: pr.number || null,
+      url: pr.url || null,
+      mergedAt: pr.mergedAt || null,
+      assignees: normalizeAssignees(pr.assignees),
+      headRefName: pr.headRefName || null,
+      baseRefName: pr.baseRefName || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function getPullRequestForCommit(repo, sha) {
   const result = tryGh([
     'api',
@@ -293,14 +337,21 @@ function getPullRequestForCommit(repo, sha) {
   const filtered = prs.filter((pr) => shouldIncludePullRequest(pr));
   const chosen = filtered.find((pr) => pr && pr.merged_at) || filtered[0];
 
-  if (!chosen) {
+  if (!chosen || !chosen.number) {
     return null;
+  }
+
+  const enriched = enrichPullRequestDetails(repo, chosen.number);
+  if (enriched && shouldIncludePullRequest(enriched)) {
+    return enriched;
   }
 
   return {
     title: chosen.title || null,
     number: chosen.number || null,
     url: chosen.html_url || null,
+    mergedAt: chosen.merged_at || null,
+    assignees: normalizeAssignees(chosen.assignees),
     headRefName: chosen.head && chosen.head.ref ? chosen.head.ref : null,
     baseRefName: chosen.base && chosen.base.ref ? chosen.base.ref : null,
   };
@@ -319,7 +370,17 @@ function getMergedChangesFallbackFromGitLog() {
       title,
       number: null,
       url: null,
+      mergedAt: null,
+      assignees: [],
     }));
+}
+
+function sortChangesByMergedAtDesc(changes) {
+  return [...changes].sort((a, b) => {
+    const aTime = a.mergedAt ? Date.parse(a.mergedAt) : 0;
+    const bTime = b.mergedAt ? Date.parse(b.mergedAt) : 0;
+    return bTime - aTime;
+  });
 }
 
 function getMergedChanges() {
@@ -354,7 +415,7 @@ function getMergedChanges() {
   }
 
   if (mergedChanges.length > 0) {
-    return mergedChanges;
+    return sortChangesByMergedAtDesc(mergedChanges);
   }
 
   console.warn('Unable to map develop-only commits to user PRs. Falling back to git log subjects.');
@@ -366,6 +427,28 @@ function formatChangeForMarkdown(change) {
     return `- ${change.title} ([#${change.number}](${change.url}))`;
   }
   return `- ${change.title}`;
+}
+
+function formatDateTime(value) {
+  if (!value) return 'Unknown';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toISOString().replace('T', ' ').replace('.000Z', ' UTC');
+}
+
+function formatAssigneeList(change) {
+  if (!change.assignees || change.assignees.length === 0) {
+    return 'Unassigned';
+  }
+  return change.assignees.join(', ');
+}
+
+function formatRecentReadmeEntry(change) {
+  const prLink = change.number && change.url
+    ? `[#${change.number}](${change.url})`
+    : '(no PR link)';
+
+  return `- ${change.title} ${prLink} | Assignee: \`${formatAssigneeList(change)}\` | Merged: \`${formatDateTime(change.mergedAt)}\``;
 }
 
 function updateChangelog(changes) {
@@ -430,18 +513,19 @@ function updateReadme(changes, releaseTag, releaseBranch) {
   }
 
   const ownerRepo = process.env.GITHUB_REPOSITORY;
-  const prStatusBadge = '![PR Status](https://img.shields.io/badge/release_pr-open-blue)';
-  const releaseBadge = `![Release](https://img.shields.io/badge/release-${releaseTag}-green)`;
+  const releaseBadge = `![Latest Release](https://img.shields.io/badge/release-${releaseTag}-green)`;
   const branchBadge = `![Branch](https://img.shields.io/badge/branch-${releaseBranch.replace(/\//g, '%2F')}-orange)`;
+  const automationBadge = '![Release Flow](https://img.shields.io/badge/release-automated-blue)';
 
-  const changesBlock = changes.length === 0
-    ? '- No user PR changes detected between develop and master.'
-    : changes.map((item) => formatChangeForMarkdown(item)).join('\n');
+  const recentChanges = sortChangesByMergedAtDesc(changes).slice(0, 5);
+  const recentChangesBlock = recentChanges.length === 0
+    ? '- No recent user PRs found for this release.'
+    : recentChanges.map((item) => formatRecentReadmeEntry(item)).join('\n');
 
   const section = [
     '## Latest Release',
     '',
-    `${prStatusBadge} ${releaseBadge} ${branchBadge}`,
+    `${automationBadge} ${releaseBadge} ${branchBadge}`,
     '',
     `- Repository: \`${ownerRepo}\``,
     `- Release Date: \`${getDisplayDate()}\``,
@@ -450,12 +534,9 @@ function updateReadme(changes, releaseTag, releaseBranch) {
     '- Source Branch: `develop`',
     '- Target Branch: `master`',
     '',
-    '<details>',
-    '<summary>Included User PRs</summary>',
+    '### Last 5 Merged User PRs',
     '',
-    changesBlock,
-    '',
-    '</details>',
+    recentChangesBlock,
   ].join('\n');
 
   const pattern = new RegExp(
