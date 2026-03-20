@@ -63,7 +63,7 @@ jobs:
         if: steps.pr.outputs.found == 'true'
         id: tag
         run: |
-          TAG=$(echo "${{ steps.pr.outputs.branch }}" | sed 's#^release/deploy_#v#')
+          TAG=$(echo "${{ steps.pr.outputs.branch }}" | sed -E 's#^release/deploy_([0-9]{4})_([0-9]{2})_([0-9]{2})_([0-9]+)$#v\1.\2.\3.\4#')
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Using tag: $TAG"
 
