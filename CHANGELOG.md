@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-03-20
+
+### Release v2026_03_20_1
+
+- Access Control - Delete file2.txt ([#51](https://github.com/desertsunny29x/jetblue-dbt-access-control/pull/51))
+- Sync master back to develop ([#50](https://github.com/desertsunny29x/jetblue-dbt-access-control/pull/50))
+
 ## 2026-03-18
 
 ### Release v2026_03_18_1
@@ -12,5 +19,6 @@
 ### Release v2026_03_18_1
 
 - Access Control - Update file1.txt ([#45](https://github.com/desertsunny29x/jetblue-dbt-access-control/pull/45))
+
 
 
